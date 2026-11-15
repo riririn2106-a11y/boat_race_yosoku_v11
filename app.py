@@ -328,8 +328,8 @@ def parse_live_images(uploaded_images, api_key):
     response = generate_with_retry(client, contents, LiveRaceData)
     return json.loads(response.text)
 
-st.set_page_config(page_title="競艇予想システム v11.0", page_icon="🚤", layout="centered")
-st.title("🔮 競艇AI予想システム v11.0")
+st.set_page_config(page_title="競艇予想システム v9.0", page_icon="🚤", layout="centered")
+st.title("🔮 競艇AI予想システム v9.0")
 st.caption("【2段階入力版】前日出走表PDF一括読み込み ＋ 直前情報スクショ合体")
 
 api_key = st.secrets.get("GEMINI_API_KEY", "")

@@ -72,6 +72,7 @@ class BoatData(BaseModel):
 class RaceExtractedData(BaseModel):
     stadium_name: str
     boats: list[BoatData]
+
 def calculate_deviation_diff(series, reverse=False):
     values = pd.Series(series, copy=False).astype(float)
     if values.empty: return pd.Series(dtype=float)
@@ -128,8 +129,10 @@ def predict_race_v9(race_data, stadium_name, profiles):
     df.loc[df["gap_turn"] == 0.0, "spec_deashi"] += 3.0
     
     df["ex_score"] = 0.0
-    df.loc[df["target_course"].isin([1, 2, 3]), "ex_score"] = (df["spec_deashi"] * 1.4) + (df["spec_nobi"] * 1.1)
-    df.loc[df["target_course"].isin([4, 5, 6]), "ex_score"] = (df["spec_nobi"] * 1.5) + (df["spec_deashi"] * 1.0)
+    in_courses = (1, 2, 3)
+    out_courses = (4, 5, 6)
+    df.loc[df["target_course"].isin(in_courses), "ex_score"] = (df["spec_deashi"] * 1.4) + (df["spec_nobi"] * 1.1)
+    df.loc[df["target_course"].isin(out_courses), "ex_score"] = (df["spec_nobi"] * 1.5) + (df["spec_deashi"] * 1.0)
     
     df["trust_factor"] = df["class_type"].map(CLASS_RELIABILITY).fillna(0.85)
     
@@ -151,6 +154,7 @@ def predict_race_v9(race_data, stadium_name, profiles):
     df["pred_2nd_prob"] = (df["base_2nd"] * f_2nd).clip(lower=0, upper=1.0)
     df["pred_3rd_prob"] = (df["base_3rd"] * f_3rd).clip(lower=0, upper=1.0)
     return df
+
 def generate_custom_bets_v9(res_df, conf_rank):
     prob_1st = res_df.set_index("boat_no")["pred_1st_prob"].to_dict()
     prob_2nd = res_df.set_index("boat_no")["pred_2nd_prob"].to_dict()
@@ -160,12 +164,12 @@ def generate_custom_bets_v9(res_df, conf_rank):
     sashi_dict = res_df.set_index("boat_no")["sashi_rate"].to_dict()
     
     trifecta_list = []
-    boats = [1, 2, 3, 4, 5, 6]
+    boats = (1, 2, 3, 4, 5, 6)
     for p1, p2, p3 in itertools.permutations(boats, 3):
         bias_map = DEVELOPMENT_BIAS.get(p1, {})
         rem_sum_2nd = sum(prob_2nd[b] * bias_map.get(b, 1.0) for b in boats if b != p1)
         p2_cond = (prob_2nd[p2] * bias_map.get(p2, 1.0)) / rem_sum_2nd if rem_sum_2nd > 0 else 0.2
-        rem_sum_3rd = sum(prob_3rd[b] * bias_map.get(b, 1.0) for b in boats if b not in [p1, p2])
+        rem_sum_3rd = sum(prob_3rd[b] * bias_map.get(b, 1.0) for b in boats if b not in (p1, p2))
         p3_cond = (prob_3rd[p3] * bias_map.get(p3, 1.0)) / rem_sum_3rd if rem_sum_3rd > 0 else 0.2
         
         raw_prob = prob_1st[p1] * p2_cond * p3_cond
@@ -175,10 +179,11 @@ def generate_custom_bets_v9(res_df, conf_rank):
     df_tri["確率"] = df_tri["prob"] / df_tri["prob"].sum()
     
     def estimate_market_pop(comb):
-        p1 = int(comb[0])
-        p2 = int(comb[2])
-        score = 1.5 if p1 == 1 else (0.8 if p1 in [2, 3, 4] else 0.4)
-        if p2 in:
+        parts = comb.split("-")
+        p1 = int(parts[0])
+        p2 = int(parts[1])
+        score = 1.5 if p1 == 1 else (0.8 if p1 in (2, 3, 4) else 0.4)
+        if p2 in (5, 6):
             score *= 0.8
         return score
 
@@ -188,7 +193,7 @@ def generate_custom_bets_v9(res_df, conf_rank):
     final_bets = []
     report_data = []
     
-    if conf_rank in ["D", "E"]:
+    if conf_rank in ("D", "E"):
         enemy_probs = {b: prob_1st[b] for b in boats if b != 1}
         sorted_enemies = sorted(enemy_probs.items(), key=lambda x: x[1], reverse=True)
         
@@ -216,7 +221,7 @@ def generate_custom_bets_v9(res_df, conf_rank):
         head_count = 10 if conf_rank == "A" else 6
         final_bets = df_tri.sort_values(by="確率", ascending=False).head(head_count)["買い目"].tolist()
         
-        if conf_rank in ["C+", "C", "C-"]:
+        if conf_rank in ("C+", "C", "C-"):
             df_ana_pool = df_tri[df_tri["確率"] >= 0.015].copy()
             if df_ana_pool.empty or len(df_ana_pool) < 6:
                 df_ana_pool = df_tri.iloc[6:].copy()
@@ -265,6 +270,7 @@ def extract_race_data_from_images(images, api_key):
         ),
     )
     return json.loads(response.text)
+
 st.set_page_config(page_title="競艇予想システム v9.0", page_icon="🚤", layout="centered")
 st.title("🔮 競艇AI予想システム v9.0")
 st.caption("出走表・展示・ボートレース日和のスクショ（6〜8枚）をまとめて選択してください")
@@ -275,7 +281,7 @@ if not api_key:
 
 uploaded_files = st.file_uploader(
     "📸 スクリーンショットを選択（複数枚OK）",
-    type=["png", "jpg", "jpeg", "webp"],
+    type=("png", "jpg", "jpeg", "webp"),
     accept_multiple_files=True
 )
 
@@ -330,11 +336,9 @@ if st.button("🚀 スクショをAI解析して予想実行", type="primary", u
 if "race_df" in st.session_state:
     st.divider()
     st.subheader("📋 AI読み取りデータ確認（直接タップで修正可能）")
-    edited_stadium = st.selectbox(
-        "競艇場", 
-        list(STADIUM_PROFILES.keys()), 
-        index=list(STADIUM_PROFILES.keys()).index(st.session_state["stadium"]) if st.session_state["stadium"] in STADIUM_PROFILES else 0
-    )
+    stadium_keys = list(STADIUM_PROFILES.keys())
+    default_idx = stadium_keys.index(st.session_state["stadium"]) if st.session_state["stadium"] in stadium_keys else 0
+    edited_stadium = st.selectbox("競艇場", stadium_keys, index=default_idx)
     edited_df = st.data_editor(st.session_state["race_df"], use_container_width=True, hide_index=True)
     
     res = predict_race_v9(edited_df, edited_stadium, STADIUM_PROFILES)
@@ -354,7 +358,7 @@ if "race_df" in st.session_state:
     st.markdown(f"### 🏟️ ボートレース {edited_stadium} | ランク 【 {conf_rank} 】")
     st.metric(label="1号艇 1着予測確率", value=f"{confidence_score*100:.1f}%")
     
-    if conf_rank in ["D", "E"]:
+    if conf_rank in ("D", "E"):
         st.error("🔥 【警告】イン飛び波乱レース。決まり手特性から展開軸を自動構成します。")
         for idx, r_data in enumerate(report_data):
             with st.container(border=True):
@@ -367,14 +371,14 @@ if "race_df" in st.session_state:
                 )
     else:
         st.subheader("🟩 三連単ターゲット（通常表示）")
-        if conf_rank in ["C+", "C", "C-"]:
+        if conf_rank in ("C+", "C", "C-"):
             st.caption(f"※1号艇が頭の可能性もありますが、相手が絞りづらい混戦（{conf_rank}）の番組構成です。")
         
         cols = st.columns(2)
         for idx, bet in enumerate(final_bets):
             cols[idx % 2].success(f"第{idx+1}点 : **【 {bet} 】**")
             
-        if conf_rank in ["C+", "C", "C-"] and isinstance(report_data, list):
+        if conf_rank in ("C+", "C", "C-") and isinstance(report_data, list):
             st.subheader("🏴‍☠️ 三連単：妙味・穴枠厳選6点")
             for idx, row in enumerate(report_data):
                 st.warning(f"第{idx+1}点 : **【 {row['買い目']} 】** ({row['確率']*100:.2f}%) [妙味度:{row['妙味度']:.2f}]")

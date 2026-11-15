@@ -48,14 +48,32 @@ WEIGHTS = {
 }
 CLASS_RELIABILITY = {"A1": 1.15, "A2": 1.00, "B1": 0.85, "B2": 0.50}
 
-class BoatData(BaseModel):
+class BaseBoatInfo(BaseModel):
     boat_no: int
+    racer_name: str
     class_type: str
     win_rate_national: float
     rate_national: float
     win_rate_local: float
     rate_local: float
     motor_rate: float
+    c1_rates: list[float]
+    c2_rates: list[float]
+    c3_rates: list[float]
+    c4_rates: list[float]
+    c5_rates: list[float]
+    c6_rates: list[float]
+
+class SingleRaceBase(BaseModel):
+    race_no: int
+    boats: list[BaseBoatInfo]
+
+class AllRacesBaseData(BaseModel):
+    stadium_name: str
+    races: list[SingleRaceBase]
+
+class LiveBoatInfo(BaseModel):
+    boat_no: int
     exhibition_st: float
     tilt: float
     straight_time: float
@@ -69,9 +87,8 @@ class BoatData(BaseModel):
     sashi_rate: float
     is_flying: bool
 
-class RaceExtractedData(BaseModel):
-    stadium_name: str
-    boats: list[BoatData]
+class LiveRaceData(BaseModel):
+    boats: list[LiveBoatInfo]
 
 def calculate_deviation_diff(series, reverse=False):
     values = pd.Series(series, copy=False).astype(float)
@@ -230,42 +247,73 @@ def generate_custom_bets_v9(res_df, conf_rank):
         
     return final_bets, report_data
 
-def extract_race_data_from_images(images, api_key):
+def parse_base_files(uploaded_files, api_key):
     client = genai.Client(api_key=api_key)
     prompt = """
-    添付された複数の画像（競艇の出走表、直前情報、展示タイム、ボートレース日和のコース別戦績・決まり手データなど）を統合して解析し、
-    1号艇から6号艇までの正確な数値を抽出してください。
+    添付された競艇の出走表（PDFまたは画像）から、記載されている全レース（1R〜12Rなど）の基本データを抽出してください。
 
     【抽出ルール】
-    - stadium_name: 競艇場名（「大村」「住之江」「江戸川」など、「ボートレース」を除いた場名のみ）
-    - boat_no: 艇番（1〜6の整数）
-    - class_type: 級別（"A1", "A2", "B1", "B2" のいずれか）
-    - win_rate_national: 全国勝率
-    - rate_national: 全国2連率
-    - win_rate_local: 当地勝率
-    - rate_local: 当地2連率
-    - motor_rate: モーター2連率
-    - exhibition_st: 展示ST（例: .12 なら 0.12、F.01 なら 0.01 とし is_flying を true にする）
+    - stadium_name: 競艇場名（「戸田」「大村」「住之江」など場名のみ）
+    - races: 掲載されている各レースのリスト
+      - race_no: レース番号（1〜12の整数）
+      - boats: 1号艇〜6号艇のリスト
+        - boat_no: 艇番（1〜6）
+        - racer_name: 選手名
+        - class_type: 級別（"A1", "A2", "B1", "B2"）
+        - win_rate_national: 全国勝率（上段の勝率）
+        - rate_national: 全国2連率（上段の2連率）
+        - win_rate_local: 当地勝率（下段の勝率）
+        - rate_local: 当地2連率（下段の2連率）
+        - motor_rate: モーター2連率
+        - c1_rates 〜 c6_rates: 全国コース別欄（1〜6コース）の成績から計算した [1着率(%), 2着率(%), 3着率(%)] の3要素配列。
+          ※表に「上段：進入回数」「下段：1・2・3着回数」が書かれている場合は、(回数 ÷ 進入回数 × 100) で1着率・2着率・3着率を計算してください。進入回数が0または「-」の場合は [0.0, 0.0, 0.0] としてください。
+    """
+    contents = [prompt]
+    for f in uploaded_files:
+        file_bytes = f.getvalue()
+        mime_type = f.type if f.type else "application/pdf"
+        contents.append(types.Part.from_bytes(data=file_bytes, mime_type=mime_type))
+
+    response = client.models.generate_content(
+        model="gemini-3.8-flash",
+        contents=contents,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=AllRacesBaseData,
+            temperature=0.1,
+        ),
+    )
+    return json.loads(response.text)
+
+def parse_live_images(uploaded_images, api_key):
+    client = genai.Client(api_key=api_key)
+    prompt = """
+    添付された直前情報・展示タイム・ボートレース日和などのスクリーンショットから、1号艇〜6号艇の直前データを抽出してください。
+    記載がない項目は 0.0（target_courseは枠番と同じ1〜6）にしてください。
+
+    【抽出ルール】
+    - boat_no: 艇番（1〜6）
+    - exhibition_st: 展示ST（例: .12 -> 0.12, F.01 -> 0.01 で is_flying=true）
     - tilt: チルト角度（例: -0.5, 0.0, 0.5）
-    - straight_time: 直線タイム（記載がない場合は展示タイムと同値または平均値）
-    - turn_time: 回り足タイム（記載がない場合は展示タイムと同値または平均値）
-    - inspect_time: 展示タイム（1周タイムや展示タイム）
-    - target_course: 進入予定コース（スタート展示の並び順。枠なりなら1〜6）
-    - course_1st_rate: 当該進入コースでの1着率（%）
-    - course_2nd_rate: 当該進入コースでの2着率（%）
-    - course_3rd_rate: 当該進入コースでの3着率（%）
+    - straight_time: 直線タイム（記載がなければ展示タイムと同じ値）
+    - turn_time: 回り足タイム（記載がなければ展示タイムと同じ値）
+    - inspect_time: 展示タイム（1周タイムまたは展示タイム）
+    - target_course: スタート展示の進入コース（1〜6）
+    - course_1st_rate: 当該進入コースでの1着率（%）（画像に記載がある場合のみ抽出、なければ0.0）
+    - course_2nd_rate: 当該進入コースでの2着率（%）（画像に記載がある場合のみ抽出、なければ0.0）
+    - course_3rd_rate: 当該進入コースでの3着率（%）（画像に記載がある場合のみ抽出、なければ0.0）
     - makuri_rate: 当該コースでの1着時「まくり」率（%）
     - sashi_rate: 当該コースでの1着時「差し」＋「まくり差し」の合計率（%）
     - is_flying: 展示STでフライング（F）している場合は true、それ以外は false
     """
-    
+    images = [Image.open(f) for f in uploaded_images]
     contents = [prompt] + images
     response = client.models.generate_content(
         model="gemini-3.8-flash",
         contents=contents,
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
-            response_schema=RaceExtractedData,
+            response_schema=LiveRaceData,
             temperature=0.1,
         ),
     )
@@ -273,75 +321,138 @@ def extract_race_data_from_images(images, api_key):
 
 st.set_page_config(page_title="競艇予想システム v9.0", page_icon="🚤", layout="centered")
 st.title("🔮 競艇AI予想システム v9.0")
-st.caption("出走表・展示・ボートレース日和のスクショ（6〜8枚）をまとめて選択してください")
+st.caption("【2段階入力版】前日出走表PDF一括読み込み ＋ 直前情報スクショ合体")
 
 api_key = st.secrets.get("GEMINI_API_KEY", "")
 if not api_key:
     api_key = st.text_input("Gemini APIキーを入力", type="password")
 
-uploaded_files = st.file_uploader(
-    "📸 スクリーンショットを選択（複数枚OK）",
+# ==========================================
+# STEP 1: 前日出走表PDF（または画像）の一括読み込み
+# ==========================================
+with st.expander("📂 ステップ1：出走表PDF・基本データの事前読み込み（1日1回）", expanded=("base_races" not in st.session_state)):
+    base_files = st.file_uploader(
+        "公式出走表PDF（1R〜6R、7R〜12Rなど複数選択可）をアップロード",
+        type=("pdf", "png", "jpg", "jpeg"),
+        accept_multiple_files=True,
+        key="base_uploader"
+    )
+    if st.button("📥 出走表から全レース基本データを抽出・保存", use_container_width=True):
+        if not api_key:
+            st.error("APIキーが設定されていません。")
+        elif not base_files:
+            st.warning("出走表PDFまたは画像を選択してください。")
+        else:
+            with st.spinner("出走表から全レースの選手・勝率・コース別入着率を解析中（約10〜15秒）..."):
+                try:
+                    parsed = parse_base_files(base_files, api_key)
+                    st.session_state["base_stadium"] = parsed["stadium_name"]
+                    race_dict = {}
+                    for r in parsed["races"]:
+                        race_dict[r["race_no"]] = r["boats"]
+                    st.session_state["base_races"] = race_dict
+                    st.success(f"✅ ボートレース【{parsed['stadium_name']}】の {len(race_dict)} レース分を保存しました！")
+                except Exception as e:
+                    st.error(f"出走表の解析エラー: {e}")
+
+# ==========================================
+# STEP 2: レース選択 ＋ 直前情報スクショの追加
+# ==========================================
+st.divider()
+st.subheader("⚡ ステップ2：レース選択 ＆ 直前情報スクショ合体")
+
+stadium_keys = list(STADIUM_PROFILES.keys())
+saved_stadium = st.session_state.get("base_stadium", "戸田")
+default_st_idx = stadium_keys.index(saved_stadium) if saved_stadium in stadium_keys else 0
+
+col1, col2 = st.columns(2)
+selected_stadium = col1.selectbox("競艇場", stadium_keys, index=default_st_idx)
+
+available_races = sorted(list(st.session_state["base_races"].keys())) if "base_races" in st.session_state else list(range(1, 13))
+selected_race_no = col2.selectbox("予想するレース番号", available_races, format_func=lambda x: f"{x} R")
+
+if "base_races" in st.session_state and selected_race_no in st.session_state["base_races"]:
+    st.caption(f"✅ {selected_stadium} {selected_race_no}R の前日出走表データセット済み")
+else:
+    st.warning("⚠️ このレースの出走表データが未登録です（ステップ1でPDFを読み込むか、直前画像に全情報を含めてください）")
+
+live_files = st.file_uploader(
+    "📸 直前情報・展示タイム・ボートレース日和のスクショを選択",
     type=("png", "jpg", "jpeg", "webp"),
-    accept_multiple_files=True
+    accept_multiple_files=True,
+    key="live_uploader"
 )
 
-if uploaded_files:
-    st.info(f"選択済み画像: {len(uploaded_files)} 枚")
-
-if st.button("🚀 スクショをAI解析して予想実行", type="primary", use_container_width=True):
+if st.button("🚀 直前情報を合体して予想実行", type="primary", use_container_width=True):
     if not api_key:
         st.error("APIキーが設定されていません。")
-    elif not uploaded_files:
-        st.warning("スクリーンショットを1枚以上選択してください。")
+    elif not live_files:
+        st.warning("直前情報のスクリーンショットを1枚以上選択してください。")
     else:
-        with st.spinner("AIが6〜8枚の画像からデータを統合・数値化しています（約5〜10秒）..."):
+        with st.spinner("直前情報を解析し、出走表データと合体して計算中..."):
             try:
-                images = [Image.open(f) for f in uploaded_files]
-                extracted = extract_race_data_from_images(images, api_key)
+                live_parsed = parse_live_images(live_files, api_key)
+                live_map = {b["boat_no"]: b for b in live_parsed["boats"]}
                 
-                stadium = extracted["stadium_name"]
-                boats_list = extracted["boats"]
+                base_boats = st.session_state.get("base_races", {}).get(selected_race_no, [])
+                base_map = {b["boat_no"]: b for b in base_boats}
                 
                 df_records = []
-                for b in sorted(boats_list, key=lambda x: x["boat_no"]):
+                for b_no in range(1, 7):
+                    base_b = base_map.get(b_no, {})
+                    live_b = live_map.get(b_no, {})
+                    
+                    t_course = live_b.get("target_course", b_no)
+                    if t_course not in (1, 2, 3, 4, 5, 6):
+                        t_course = b_no
+                        
+                    # コース別1・2・3着率：直前画像にあれば優先、なければ前日PDFの進入コース別率を使用
+                    c_rates = base_b.get(f"c{t_course}_rates", [0.0, 0.0, 0.0])
+                    if len(c_rates) < 3:
+                        c_rates = [0.0, 0.0, 0.0]
+                        
+                    c1_r = live_b.get("course_1st_rate", 0.0) or c_rates[0]
+                    c2_r = live_b.get("course_2nd_rate", 0.0) or c_rates[1]
+                    c3_r = live_b.get("course_3rd_rate", 0.0) or c_rates[2]
+                    
                     df_records.append({
-                        "boat_no": b["boat_no"],
-                        "class_type": b["class_type"],
-                        "win_rate_national": b["win_rate_national"],
-                        "2rate_national": b["rate_national"],
-                        "win_rate_local": b["win_rate_local"],
-                        "2rate_local": b["rate_local"],
-                        "motor_rate": b["motor_rate"],
-                        "exhibition_st": b["exhibition_st"],
-                        "tilt": b["tilt"],
-                        "straight_time": b["straight_time"],
-                        "turn_time": b["turn_time"],
-                        "inspect_time": b["inspect_time"],
-                        "target_course": b["target_course"],
-                        "course_1st_rate": b["course_1st_rate"],
-                        "course_2nd_rate": b["course_2nd_rate"],
-                        "course_3rd_rate": b["course_3rd_rate"],
-                        "makuri_rate": b["makuri_rate"],
-                        "sashi_rate": b["sashi_rate"],
-                        "is_flying": b["is_flying"]
+                        "boat_no": b_no,
+                        "class_type": base_b.get("class_type", "B1"),
+                        "win_rate_national": base_b.get("win_rate_national", 5.0),
+                        "2rate_national": base_b.get("rate_national", 30.0),
+                        "win_rate_local": base_b.get("win_rate_local", 5.0),
+                        "2rate_local": base_b.get("rate_local", 30.0),
+                        "motor_rate": base_b.get("motor_rate", 30.0),
+                        "exhibition_st": live_b.get("exhibition_st", 0.15),
+                        "tilt": live_b.get("tilt", 0.0),
+                        "straight_time": live_b.get("straight_time", 6.70),
+                        "turn_time": live_b.get("turn_time", 6.70),
+                        "inspect_time": live_b.get("inspect_time", 6.70),
+                        "target_course": t_course,
+                        "course_1st_rate": c1_r,
+                        "course_2nd_rate": c2_r,
+                        "course_3rd_rate": c3_r,
+                        "makuri_rate": live_b.get("makuri_rate", 0.0),
+                        "sashi_rate": live_b.get("sashi_rate", 0.0),
+                        "is_flying": live_b.get("is_flying", False)
                     })
                 
-                target_race_data = pd.DataFrame(df_records)
-                st.session_state["race_df"] = target_race_data
-                st.session_state["stadium"] = stadium
+                st.session_state["merged_df"] = pd.DataFrame(df_records)
+                st.session_state["merged_stadium"] = selected_stadium
+                st.session_state["merged_race_no"] = selected_race_no
                 
             except Exception as e:
-                st.error(f"解析エラーが発生しました: {e}")
+                st.error(f"解析・合体エラーが発生しました: {e}")
 
-if "race_df" in st.session_state:
+# ==========================================
+# 結果表示＆手動微調整テーブル
+# ==========================================
+if "merged_df" in st.session_state:
     st.divider()
-    st.subheader("📋 AI読み取りデータ確認（直接タップで修正可能）")
-    stadium_keys = list(STADIUM_PROFILES.keys())
-    default_idx = stadium_keys.index(st.session_state["stadium"]) if st.session_state["stadium"] in stadium_keys else 0
-    edited_stadium = st.selectbox("競艇場", stadium_keys, index=default_idx)
-    edited_df = st.data_editor(st.session_state["race_df"], use_container_width=True, hide_index=True)
+    st.subheader(f"📋 {st.session_state['merged_stadium']} {st.session_state['merged_race_no']}R 統合データ（タップで修正可）")
+    edited_df = st.data_editor(st.session_state["merged_df"], use_container_width=True, hide_index=True)
     
-    res = predict_race_v9(edited_df, edited_stadium, STADIUM_PROFILES)
+    res = predict_race_v9(edited_df, st.session_state["merged_stadium"], STADIUM_PROFILES)
     confidence_score = res.set_index("boat_no")["pred_1st_prob"].get(1, 0.0)
     
     if confidence_score >= 0.80: conf_rank = "A"
@@ -355,7 +466,7 @@ if "race_df" in st.session_state:
     final_bets, report_data = generate_custom_bets_v9(res, conf_rank)
     
     st.divider()
-    st.markdown(f"### 🏟️ ボートレース {edited_stadium} | ランク 【 {conf_rank} 】")
+    st.markdown(f"### 🏟️ {st.session_state['merged_stadium']} {st.session_state['merged_race_no']}R | ランク 【 {conf_rank} 】")
     st.metric(label="1号艇 1着予測確率", value=f"{confidence_score*100:.1f}%")
     
     if conf_rank in ("D", "E"):

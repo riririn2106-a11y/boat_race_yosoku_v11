@@ -247,6 +247,31 @@ def generate_custom_bets_v9(res_df, conf_rank):
         
     return final_bets, report_data
 
+import time
+
+def generate_with_retry(client, contents, schema, retries=3):
+    models_to_try = ["gemini-3.8-flash", "gemini-3.8-flash-lite"]
+    last_err = None
+    for model_name in models_to_try:
+        for attempt in range(retries):
+            try:
+                return client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=schema,
+                        temperature=0.1,
+                    ),
+                )
+            except Exception as e:
+                last_err = e
+                if "503" in str(e) or "429" in str(e) or "UNAVAILABLE" in str(e):
+                    time.sleep(3)
+                    continue
+                raise e
+    raise last_err
+
 def parse_base_files(uploaded_files, api_key):
     client = genai.Client(api_key=api_key)
     prompt = """
@@ -274,15 +299,7 @@ def parse_base_files(uploaded_files, api_key):
         mime_type = f.type if f.type else "application/pdf"
         contents.append(types.Part.from_bytes(data=file_bytes, mime_type=mime_type))
 
-    response = client.models.generate_content(
-        model="gemini-3.8-flash",
-        contents=contents,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=AllRacesBaseData,
-            temperature=0.1,
-        ),
-    )
+    response = generate_with_retry(client, contents, AllRacesBaseData)
     return json.loads(response.text)
 
 def parse_live_images(uploaded_images, api_key):
@@ -308,19 +325,11 @@ def parse_live_images(uploaded_images, api_key):
     """
     images = [Image.open(f) for f in uploaded_images]
     contents = [prompt] + images
-    response = client.models.generate_content(
-        model="gemini-3.8-flash",
-        contents=contents,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=LiveRaceData,
-            temperature=0.1,
-        ),
-    )
+    response = generate_with_retry(client, contents, LiveRaceData)
     return json.loads(response.text)
 
-st.set_page_config(page_title="競艇予想システム v9.0", page_icon="🚤", layout="centered")
-st.title("🔮 競艇AI予想システム v9.0")
+st.set_page_config(page_title="競艇予想システム v11.0", page_icon="🚤", layout="centered")
+st.title("🔮 競艇AI予想システム v11.0")
 st.caption("【2段階入力版】前日出走表PDF一括読み込み ＋ 直前情報スクショ合体")
 
 api_key = st.secrets.get("GEMINI_API_KEY", "")
